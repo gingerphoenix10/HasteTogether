@@ -1,0 +1,51 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>HasteTogether</AssemblyName>
+    <Product>HasteTogether</Product>
+    <Version>1.0.0</Version>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <RestoreAdditionalProjectSources>
+      https://api.nuget.org/v3/index.json;
+      https://nuget.bepinex.dev/v3/index.json;
+      https://nuget.samboy.dev/v3/index.json
+    </RestoreAdditionalProjectSources>
+    <RootNamespace>HasteTogether</RootNamespace>
+    <HASTEDir Condition=" '$(HASTEDir)' == '' ">C:\Program Files (x86)\Steam\steamapps\common\Haste Broken Worlds Demo</HASTEDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.Analyzers" Version="1.*" PrivateAssets="all" />
+    <PackageReference Include="BepInEx.Core" Version="5.*" />
+    <PackageReference Include="BepInEx.PluginInfoProps" Version="2.*" />
+    <PackageReference Include="UnityEngine.Modules" Version="2022.3.55" IncludeAssets="compile" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Assembly-CSharp.dll" Private="false" Publicize="true"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.ControllerSupport.dll" Private="false" Publicize="true"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.Core.Runtime.dll" Private="false"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Zorro.Settings.Runtime.dll" Private="false" Publicize="true"/>
+    <Reference Include="$(HASTEDIR)\Haste_Data\Managed\Unity.Mathematics.dll" Private="false"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\UnityEngine.UI.dll" Private="false"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.TextMeshPro.dll" Private="false"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.InputSystem.dll" Private="false"/>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BepInEx.AssemblyPublicizer.MSBuild" Version="0.4.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework.TrimEnd(`0123456789`))' == 'net'">
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.2" PrivateAssets="all" />
+  </ItemGroup>
+
+  <Target Name="CopyOutputFileToGame" AfterTargets="Build">
+    <Copy SourceFiles="$(OutputPath)\$(AssemblyName).dll" DestinationFolder="$(HASTEDir)\BepInEx\Plugins\$(MSBuildProjectName)"/>
+  </Target>
+</Project>

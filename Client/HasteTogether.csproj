@@ -32,6 +32,7 @@
     <Reference Include="$(HASTEDir)\Haste_Data\Managed\UnityEngine.UI.dll" Private="false"/>
     <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.TextMeshPro.dll" Private="false"/>
     <Reference Include="$(HASTEDir)\Haste_Data\Managed\Unity.InputSystem.dll" Private="false"/>
+    <Reference Include="$(HASTEDir)\Haste_Data\Managed\com.rlabrecque.steamworks.net.dll" Private="false"/>
   </ItemGroup>
 
   <ItemGroup>

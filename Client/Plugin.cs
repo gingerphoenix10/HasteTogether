@@ -8,6 +8,10 @@ using BepInEx;
 using BepInEx.Logging;
 using HarmonyLib;
 using JetBrains.Annotations;
+using Landfall.Haste;
+using Landfall.Haste.Steam;
+using MonoMod.Utils;
+using Steamworks;
 using UnityEngine;
 using UnityEngine.UIElements;
 using Unity.Mathematics;
@@ -16,6 +20,7 @@ using Zorro.Settings;
 using Zorro.Settings.DebugUI;
 using FloatSettingUI = Zorro.Settings.UI.FloatSettingUI;
 using Logger = UnityEngine.Logger;
+using PlatformSelector = Landfall.Haste.PlatformSelector;
 
 namespace HasteTogether;
 
@@ -32,9 +37,9 @@ public class Plugin : BaseUnityPlugin
         byte[] buffer = new byte[13]; // 9 bytes for position, 4 for rotation
 
         // Position: Convert each coordinate to 3 bytes
-        int x = (int)((position.x + 8388607.5f) * 256); // Shift to unsigned 24-bit
-        int y = (int)((position.y + 8388607.5f) * 256);
-        int z = (int)((position.z + 8388607.5f) * 256);
+        int x = (int)((position.x + 32767.5f) * 256);
+        int y = (int)((position.y + 32767.5f) * 256);
+        int z = (int)((position.z + 32767.5f) * 256);
 
         buffer[0] = (byte)(x >> 16);
         buffer[1] = (byte)(x >> 8);
@@ -105,15 +110,94 @@ public class Plugin : BaseUnityPlugin
                 break;
             }
 
-            string message = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-            Console.WriteLine($"Received: {message}");
+            byte[] receivedData = new byte[bytesRead];
+            Array.Copy(buffer, receivedData, bytesRead);
+
+            switch (receivedData[0])
+            {
+                case 0x01:
+                    ushort userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    NetworkedPlayer plr = null;
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+                    plr ??= SetupNetworkedPlayer(userId);
+
+                    if (plr == null) continue;
+                    
+                    byte[] rawTransform = new Byte[13];
+                    Array.Copy(receivedData, 3, rawTransform, 0, 13);
+                    //Logger.LogInfo($"Received packet: {BitConverter.ToString(receivedData)}");
+                    //Logger.LogInfo($"Converted transform: {BitConverter.ToString(rawTransform)}");
+                    plr.ApplyTransform(rawTransform);
+                    
+                    break;
+            }
         }
+    }
+
+    private NetworkedPlayer SetupNetworkedPlayer(ushort id = 0xFFFC)
+    {
+        PlayerModel model = GameObject.FindObjectOfType<PlayerModel>();
+        if (model != null)
+        {
+            GameObject newPlayer = Instantiate(model.gameObject);
+            newPlayer.transform.position = model.gameObject.transform.position;
+            newPlayer.name = $"HasteTogether_{id}";
+            NetworkedPlayer networkedPlayer = newPlayer.AddComponent<NetworkedPlayer>();
+            networkedPlayer.userId = id;
+            Destroy(newPlayer.GetComponent<PlayerModel>());
+            return networkedPlayer;
+        }
+        Console.WriteLine("[ERROR] Not in a scene where a PlayerModel exists.");
+        return null;
     }
 }
 
 public class NetworkedPlayer : MonoBehaviour
 {
-    public string userId;
+    public ushort userId;
+    
+    public void ApplyTransform(byte[] transformData)
+    {
+        int x = (transformData[0] << 16) | (transformData[1] << 8) | transformData[2];
+        int y = (transformData[3] << 16) | (transformData[4] << 8) | transformData[5];
+        int z = (transformData[6] << 16) | (transformData[7] << 8) | transformData[8];
+
+        Vector3 position = new Vector3(
+            (x / 256.0f) - 32767.5f,
+            (y / 256.0f) - 32767.5f,
+            (z / 256.0f) - 32767.5f
+        );
+
+        // Decode Quaternion
+        byte header = transformData[9];
+        byte largestIndex = (byte)((header >> 6) & 0x03);
+        float sign = (header & 0x80) != 0 ? -1f : 1f;
+
+        int a = ((header & 0x3F) << 4) | (transformData[10] >> 4);
+        int b = ((transformData[10] & 0x0F) << 6) | (transformData[11] >> 2);
+        int c = ((transformData[11] & 0x03) << 8) | transformData[12];
+
+        float fa = (a / 1023.5f) - 1f;
+        float fb = (b / 1023.5f) - 1f;
+        float fc = (c / 1023.5f) - 1f;
+        float fw = (float)Math.Sqrt(1f - (fa * fa + fb * fb + fc * fc)) * sign;
+
+        Quaternion rotation = new Quaternion();
+        rotation[largestIndex] = fw;
+        rotation[(largestIndex + 1) % 4] = fa;
+        rotation[(largestIndex + 2) % 4] = fb;
+        rotation[(largestIndex + 3) % 4] = fc;
+        
+        gameObject.transform.position = position;
+        gameObject.transform.rotation = rotation;
+    }
 }
 
 public abstract class Packet
@@ -165,5 +249,17 @@ internal static class PlayerCharacterPatch
             packet.Send();
             Plugin.lastSent = packet;
         }
+    }
+}
+
+[HarmonyPatch(typeof(SteamAPI))]
+internal static class SteamAPIPatch
+{
+    [HarmonyPatch(nameof(SteamAPI.RestartAppIfNecessary))]
+    [HarmonyPrefix]
+    internal static bool RestartAppIfNecessary(ref bool __result)
+    {
+        __result = false;
+        return false;
     }
 }

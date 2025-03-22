@@ -8,8 +8,7 @@ using System.Threading.Tasks;
 
 class SocketServer
 {
-    private static List<Socket> clients = new List<Socket>();
-    private static object lockObj = new object();
+    private static Dictionary<Socket, ushort> clients = new();
 
     static async Task Main()
     {
@@ -43,9 +42,19 @@ class SocketServer
         while (true)
         {
             Socket clientSocket = await serverSocket.AcceptAsync();
-            lock (lockObj) clients.Add(clientSocket);
-            Console.WriteLine($"Client connected: {clientSocket.RemoteEndPoint}");
-            // give the client an id to differenciate gameobjects / players
+            ushort id = 0x0000;
+            HashSet<ushort> usedIds = new(clients.Values);
+            for (ushort idPossibility = 0x0000; idPossibility <= 0xFFFF; idPossibility++)
+            {
+                if (!usedIds.Contains(idPossibility))
+                {
+                    id = idPossibility;
+                    break;
+                }
+            }
+            
+            clients.Add(clientSocket, id);
+            Console.WriteLine($"Client connected: {clientSocket.RemoteEndPoint}. Assigning ID: {id}");
 
             // Handle client communication
             _ = Task.Run(() => HandleClient(clientSocket));
@@ -72,7 +81,15 @@ class SocketServer
                 switch (receivedData[0])
                 {
                     case 0x01:
-                        Console.WriteLine($"Received update packet. ");
+                        byte[] toSend = new byte[receivedData.Length + 2];
+                        toSend[0] = receivedData[0];
+                        toSend[1] = (byte)(clients[clientSocket] >> 8);
+                        toSend[2] = (byte)(clients[clientSocket] & 0xFF);
+                        Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
+                        foreach (KeyValuePair<Socket, ushort> client in clients)
+                        {
+                            if (client.Value != clients[clientSocket] || false) client.Key.Send(toSend);
+                        }
                         break;
                 }
             }
@@ -83,7 +100,7 @@ class SocketServer
         }
         finally
         {
-            lock (lockObj) clients.Remove(clientSocket);
+            clients.Remove(clientSocket);
             clientSocket.Close();
             Console.WriteLine($"Client {clientSocket.RemoteEndPoint} disconnected.");
         }
@@ -92,18 +109,15 @@ class SocketServer
     private static void BroadcastMessage(string message)
     {
         byte[] data = Encoding.UTF8.GetBytes(message);
-        lock (lockObj)
+        foreach (var client in clients.Keys)
         {
-            foreach (var client in clients)
+            try
             {
-                try
-                {
-                    client.Send(data);
-                }
-                catch
-                {
-                    // Ignore errors if a client disconnects suddenly
-                }
+                client.Send(data);
+            }
+            catch
+            {
+                // Ignore errors if a client disconnects suddenly
             }
         }
     }

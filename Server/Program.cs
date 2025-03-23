@@ -13,7 +13,7 @@ class SocketServer
     static async Task Main()
     {
         int port = 9843; // Change as needed
-        IPEndPoint endPoint = new IPEndPoint(IPAddress.Parse("127.0.0.1"), port);
+        IPEndPoint endPoint = new IPEndPoint(IPAddress.Any, port);
 
         using (Socket serverSocket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
         {
@@ -88,7 +88,7 @@ class SocketServer
                         Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
                         foreach (KeyValuePair<Socket, ushort> client in clients)
                         {
-                            if (client.Value != clients[clientSocket] || false) client.Key.Send(toSend);
+                            if (client.Value != clients[clientSocket]) client.Key.Send(toSend);
                         }
                         break;
                 }

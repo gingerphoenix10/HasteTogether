@@ -34,9 +34,8 @@ public class Plugin : BaseUnityPlugin
     
     public static byte[] SerializeTransform(Vector3 position, Quaternion rotation)
     {
-        byte[] buffer = new byte[13]; // 9 bytes for position, 4 for rotation
-
-        // Position: Convert each coordinate to 3 bytes
+        byte[] buffer = new byte[15];
+        
         int x = (int)((position.x + 32767.5f) * 256);
         int y = (int)((position.y + 32767.5f) * 256);
         int z = (int)((position.z + 32767.5f) * 256);
@@ -52,31 +51,23 @@ public class Plugin : BaseUnityPlugin
         buffer[6] = (byte)(z >> 16);
         buffer[7] = (byte)(z >> 8);
         buffer[8] = (byte)z;
+        
+        // Scale y and w from [-1,1] to [-8388607,8388607]
+        int rotY = Mathf.RoundToInt(rotation.y * 8388607.0f);
+        int rotW = Mathf.RoundToInt(rotation.w * 8388607.0f);
 
-        // Quaternion: Convert to 4-byte format
-        byte largestIndex = 0;
-        float largestValue = Math.Abs(rotation.w);
-        float[] quat = { rotation.x, rotation.y, rotation.z, rotation.w };
+        // Store y
+        buffer[9]  = (byte)((rotY >> 16) & 0xFF);
+        buffer[10] = (byte)((rotY >> 8) & 0xFF);
+        buffer[11] = (byte)(rotY & 0xFF);
 
-        for (byte i = 0; i < 4; i++)
-        {
-            if (Math.Abs(quat[i]) > largestValue)
-            {
-                largestIndex = i;
-                largestValue = Math.Abs(quat[i]);
-            }
-        }
+        // Store w
+        buffer[12] = (byte)((rotW >> 16) & 0xFF);
+        buffer[13] = (byte)((rotW >> 8) & 0xFF);
+        buffer[14] = (byte)(rotW & 0xFF);
 
-        byte sign = (quat[largestIndex] < 0) ? (byte)0x80 : (byte)0x00;
-        int a = (int)((quat[(largestIndex + 1) % 4] + 1) * 1023.5f);
-        int b = (int)((quat[(largestIndex + 2) % 4] + 1) * 1023.5f);
-        int c = (int)((quat[(largestIndex + 3) % 4] + 1) * 1023.5f);
-
-        buffer[9] = (byte)(sign | (largestIndex << 6) | (a >> 4));
-        buffer[10] = (byte)(((a & 0xF) << 4) | (b >> 6));
-        buffer[11] = (byte)(((b & 0x3F) << 2) | (c >> 8));
-        buffer[12] = (byte)(c & 0xFF);
-
+        //Logger.LogInfo($"Serialized {rotation.y}, {rotation.w} to {buffer[9]:X2} {buffer[10]:X2} {buffer[11]:X2} | {buffer[12]:X2} {buffer[13]:X2} {buffer[14]:X2}");
+        
         return buffer;
     }
 
@@ -87,8 +78,9 @@ public class Plugin : BaseUnityPlugin
         Logger = base.Logger;
         Patcher.PatchAll();
         Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
-        
-        IPAddress address = IPAddress.Parse("127.0.0.1");
+
+        //IPAddress address = IPAddress.Parse("127.0.0.1");
+        IPAddress address = IPAddress.Parse("45.133.89.163");
         IPEndPoint endpoint = new(address, 9843);
         client = new(
             AddressFamily.InterNetwork,
@@ -130,8 +122,8 @@ public class Plugin : BaseUnityPlugin
 
                     if (plr == null) continue;
                     
-                    byte[] rawTransform = new Byte[13];
-                    Array.Copy(receivedData, 3, rawTransform, 0, 13);
+                    byte[] rawTransform = new Byte[15];
+                    Array.Copy(receivedData, 3, rawTransform, 0, 15);
                     //Logger.LogInfo($"Received packet: {BitConverter.ToString(receivedData)}");
                     //Logger.LogInfo($"Converted transform: {BitConverter.ToString(rawTransform)}");
                     plr.ApplyTransform(rawTransform);
@@ -151,6 +143,7 @@ public class Plugin : BaseUnityPlugin
             newPlayer.name = $"HasteTogether_{id}";
             NetworkedPlayer networkedPlayer = newPlayer.AddComponent<NetworkedPlayer>();
             networkedPlayer.userId = id;
+            networkedPlayer.animator = newPlayer.GetComponentInChildren<Animator>();
             Destroy(newPlayer.GetComponent<PlayerModel>());
             return networkedPlayer;
         }
@@ -162,6 +155,10 @@ public class Plugin : BaseUnityPlugin
 public class NetworkedPlayer : MonoBehaviour
 {
     public ushort userId;
+    public Animator animator;
+
+    public Vector3 position = new Vector3();
+    public Quaternion rotation = new Quaternion();
     
     public void ApplyTransform(byte[] transformData)
     {
@@ -169,34 +166,50 @@ public class NetworkedPlayer : MonoBehaviour
         int y = (transformData[3] << 16) | (transformData[4] << 8) | transformData[5];
         int z = (transformData[6] << 16) | (transformData[7] << 8) | transformData[8];
 
-        Vector3 position = new Vector3(
+        Vector3 targetPosition = new Vector3(
             (x / 256.0f) - 32767.5f,
             (y / 256.0f) - 32767.5f,
             (z / 256.0f) - 32767.5f
         );
 
-        // Decode Quaternion
-        byte header = transformData[9];
-        byte largestIndex = (byte)((header >> 6) & 0x03);
-        float sign = (header & 0x80) != 0 ? -1f : 1f;
+        // Reconstruct 24-bit signed integers
+        int rawRotY = (transformData[9] << 16) | (transformData[10] << 8) | transformData[11];
+        int rawRotW = (transformData[12] << 16) | (transformData[13] << 8) | transformData[14];
 
-        int a = ((header & 0x3F) << 4) | (transformData[10] >> 4);
-        int b = ((transformData[10] & 0x0F) << 6) | (transformData[11] >> 2);
-        int c = ((transformData[11] & 0x03) << 8) | transformData[12];
+        // Sign extension for 24-bit integers
+        if ((rawRotY & 0x800000) != 0) rawRotY |= unchecked((int)0xFF000000);
+        if ((rawRotW & 0x800000) != 0) rawRotW |= unchecked((int)0xFF000000);
 
-        float fa = (a / 1023.5f) - 1f;
-        float fb = (b / 1023.5f) - 1f;
-        float fc = (c / 1023.5f) - 1f;
-        float fw = (float)Math.Sqrt(1f - (fa * fa + fb * fb + fc * fc)) * sign;
+        // Convert back to float range [-1,1]
+        float rotY = rawRotY / 8388607.0f;
+        float rotW = rawRotW / 8388607.0f;
 
-        Quaternion rotation = new Quaternion();
-        rotation[largestIndex] = fw;
-        rotation[(largestIndex + 1) % 4] = fa;
-        rotation[(largestIndex + 2) % 4] = fb;
-        rotation[(largestIndex + 3) % 4] = fc;
+        // Recalculate x and z to maintain unit quaternion
+        float xzSquared = 1.0f - (rotY * rotY) - (rotW * rotW);
+        float rotX = 0.0f, rotZ = 0.0f;
+        if (xzSquared > 0.0f) 
+            rotZ = Mathf.Sqrt(xzSquared); // Assume positive Z for consistency
+
+        // Apply the new quaternion
+        Quaternion targetRotation = new Quaternion(rotX, rotY, rotZ, rotW);
+        rotation = targetRotation;
+        position = targetPosition;
+
+        //Plugin.Logger.LogInfo($"Deserialized {transformData[9]:X2} {transformData[10]:X2} {transformData[11]:X2} | {transformData[12]:X2} {transformData[13]:X2} {transformData[14]:X2} to Quaternion({rotX}, {rotY}, {rotZ}, {rotW})");
         
-        gameObject.transform.position = position;
-        gameObject.transform.rotation = rotation;
+        SetAnimation("New_Courier_Idle");
+    }
+
+    public void SetAnimation(string animName)
+    {
+        animator.Play(animName);
+    }
+    
+    private float interpolationSpeed = 10.0f;
+    private void Update()
+    {
+        transform.position = Vector3.Lerp(transform.position, position, Time.deltaTime * interpolationSpeed);
+        transform.rotation = Quaternion.Slerp(transform.rotation, rotation, Time.deltaTime * interpolationSpeed);
     }
 }
 
@@ -207,7 +220,7 @@ public abstract class Packet
 
     public void Send()
     {
-        if (Plugin.client == null || !Plugin.client.Connected) throw new Exception("Not connected to a server!");
+        if (Plugin.client == null || !Plugin.client.Connected) return;//throw new Exception("Not connected to a server!");
         byte[] data = Serialize();
         byte[] toSend = new byte[data.Length+1];
         toSend[0] = PacketID();
@@ -232,7 +245,7 @@ public class UpdatePacket : Packet
     public UpdatePacket(Transform player = null)
     {
         this.position = player != null ? player.position : new Vector3();
-        this.rotation = player != null ? player.rotation : new Quaternion();
+        this.rotation = player != null ? player.GetComponent<PlayerVisualRotation>().visual.rotation : new Quaternion();
     }
 }
 

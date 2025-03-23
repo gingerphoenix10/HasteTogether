@@ -78,9 +78,12 @@ class SocketServer
                 byte[] receivedData = new byte[bytesRead];
                 Array.Copy(buffer, receivedData, bytesRead);
 
+                //Console.WriteLine(BitConverter.ToString(receivedData));
+                
                 switch (receivedData[0])
                 {
-                    case 0x01:
+                    case 0x01: 
+                    case 0x03:
                         byte[] toSend = new byte[receivedData.Length + 2];
                         toSend[0] = receivedData[0];
                         toSend[1] = (byte)(clients[clientSocket] >> 8);
@@ -91,6 +94,9 @@ class SocketServer
                             if (client.Value != clients[clientSocket]) client.Key.Send(toSend);
                         }
                         break;
+                    case 0x04:
+                        clientSocket.Send(Encoding.UTF8.GetBytes("lmao ok"));
+                        break;
                 }
             }
         }
@@ -100,6 +106,14 @@ class SocketServer
         }
         finally
         {
+            byte[] disconnectPacket = new byte[3];
+            disconnectPacket[0] = 0x02;
+            disconnectPacket[1] = (byte)(clients[clientSocket] >> 8);
+            disconnectPacket[2] = (byte)(clients[clientSocket] & 0xFF);
+            foreach (KeyValuePair<Socket, ushort> client in clients)
+            {
+                if (client.Value != clients[clientSocket]) client.Key.Send(disconnectPacket);
+            }
             clients.Remove(clientSocket);
             clientSocket.Close();
             Console.WriteLine($"Client {clientSocket.RemoteEndPoint} disconnected.");

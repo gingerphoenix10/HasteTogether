@@ -12,6 +12,7 @@ using Landfall.Haste;
 using Landfall.Haste.Steam;
 using MonoMod.Utils;
 using Steamworks;
+using TMPro;
 using UnityEngine;
 using UnityEngine.UIElements;
 using Unity.Mathematics;
@@ -90,6 +91,8 @@ public class Plugin : BaseUnityPlugin
         Logger.LogInfo("Connecting to server...");
         await client.ConnectAsync(endpoint);
         Logger.LogInfo("Connected!");
+
+        new NamePacket(SteamFriends.GetPersonaName()).Send();
         
         byte[] buffer = new byte[1024];
         
@@ -105,11 +108,12 @@ public class Plugin : BaseUnityPlugin
             byte[] receivedData = new byte[bytesRead];
             Array.Copy(buffer, receivedData, bytesRead);
 
+            ushort userId;
+            NetworkedPlayer plr = null;
             switch (receivedData[0])
             {
                 case 0x01:
-                    ushort userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
-                    NetworkedPlayer plr = null;
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
                     foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
                     {
                         if (plrPossibility.userId == userId)
@@ -118,9 +122,9 @@ public class Plugin : BaseUnityPlugin
                             break;
                         }
                     }
-                    plr ??= SetupNetworkedPlayer(userId);
+                    plr ??= await SetupNetworkedPlayer(userId);
 
-                    if (plr == null) continue;
+                    if (plr == null) break;
                     
                     byte[] rawTransform = new Byte[15];
                     Array.Copy(receivedData, 3, rawTransform, 0, 15);
@@ -129,12 +133,49 @@ public class Plugin : BaseUnityPlugin
                     plr.ApplyTransform(rawTransform);
                     
                     break;
+                case 0x02:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+                    
+                    if (plr != null)
+                        Destroy(plr.gameObject);
+                    
+                    break;
+                case 0x03:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+                    plr ??= await SetupNetworkedPlayer(userId);
+
+                    if (plr == null) break;
+
+                    plr.playerName = Encoding.UTF8.GetString(receivedData, 3, receivedData.Length - 3);
+                    plr.playerNameText.text = plr.playerName;
+                    
+                    break;
             }
         }
     }
 
-    private NetworkedPlayer SetupNetworkedPlayer(ushort id = 0xFFFC)
+    private async Task<NetworkedPlayer> SetupNetworkedPlayer(ushort id = 0xFFFC)
     {
+        new GetPacket(id).Send();
+
+        // somehow get return data here to populate stuff like username
+        
         PlayerModel model = GameObject.FindObjectOfType<PlayerModel>();
         if (model != null)
         {
@@ -159,6 +200,9 @@ public class NetworkedPlayer : MonoBehaviour
 
     public Vector3 position = new Vector3();
     public Quaternion rotation = new Quaternion();
+    public string playerName = "Unknown";
+    public Canvas playerCanvas;
+    public TextMeshProUGUI playerNameText;
     
     public void ApplyTransform(byte[] transformData)
     {
@@ -210,6 +254,31 @@ public class NetworkedPlayer : MonoBehaviour
     {
         transform.position = Vector3.Lerp(transform.position, position, Time.deltaTime * interpolationSpeed);
         transform.rotation = Quaternion.Slerp(transform.rotation, rotation, Time.deltaTime * interpolationSpeed);
+        if (playerCanvas == null)
+        {
+            GameObject canvasObj = new GameObject();
+            canvasObj.transform.SetParent(transform);
+            canvasObj.name = "PlayerCanvas";
+            playerCanvas = canvasObj.AddComponent<Canvas>();
+            playerCanvas.worldCamera = Camera.main;
+            canvasObj.transform.localPosition = new Vector3(0, 2.5f, 0);
+            canvasObj.transform.localScale = new Vector3(0.006f, 0.006f, 0.006f);
+        }
+
+        if (playerNameText == null)
+        {
+            GameObject nameObj = new GameObject();
+            nameObj.transform.SetParent(playerCanvas.transform);
+            nameObj.name = "Nametag";
+            nameObj.transform.localPosition = new Vector3(0, 0, 0);
+            nameObj.transform.localScale = new Vector3(1, 1, 1);
+            playerNameText = nameObj.AddComponent<TextMeshProUGUI>();
+            playerNameText.text = playerName;
+            playerNameText.enableWordWrapping = false;
+            playerNameText.alignment = TextAlignmentOptions.Center;
+        }
+        
+        playerCanvas.transform.forward = Camera.main.transform.forward;
     }
 }
 
@@ -234,8 +303,8 @@ public class UpdatePacket : Packet
     public override byte PacketID() => 0x01;
     public override byte[] Serialize() => Plugin.SerializeTransform(position, rotation);
 
-    public Vector3 position;
-    public Quaternion rotation;
+    private Vector3 position;
+    private Quaternion rotation;
     
     public bool Equals( UpdatePacket obj )
     {
@@ -246,6 +315,40 @@ public class UpdatePacket : Packet
     {
         this.position = player != null ? player.position : new Vector3();
         this.rotation = player != null ? player.GetComponent<PlayerVisualRotation>().visual.rotation : new Quaternion();
+    }
+}
+
+public class NamePacket : Packet
+{
+    private string name;
+    public override byte PacketID() => 0x03;
+    public override byte[] Serialize()
+    {
+        return Encoding.UTF8.GetBytes(name);
+    }
+
+    public NamePacket(string name)
+    {
+        this.name = name;
+    }
+}
+
+public class GetPacket : Packet
+{
+    private ushort userId;
+    public override byte PacketID() => 0x04;
+
+    public override byte[] Serialize()
+    {
+        byte[] toSend = new byte[2];
+        toSend[0] = (byte)(userId >> 8);
+        toSend[1] = (byte)(userId & 0xFF);
+        return toSend;
+    }
+    
+    public GetPacket(ushort userId)
+    {
+        this.userId = userId;
     }
 }
 

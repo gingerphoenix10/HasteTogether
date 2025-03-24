@@ -31,7 +31,97 @@ public class Plugin : BaseUnityPlugin
     internal static new ManualLogSource Logger;
     private static readonly Harmony Patcher = new(MyPluginInfo.PLUGIN_GUID);
 
-    public static Socket client;
+    public static SocketManager manager;
+
+    public static UpdatePacket lastSent = new();
+    
+    private async void Awake()
+    {
+        Logger = base.Logger;
+        Patcher.PatchAll();
+        Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
+
+        //IPAddress address = IPAddress.Parse("127.0.0.1");
+        IPAddress address = IPAddress.Parse("45.133.89.163");
+        IPEndPoint endpoint = new(address, 9843);
+        manager = new SocketManager(new Socket(
+            AddressFamily.InterNetwork,
+            SocketType.Stream,
+            ProtocolType.Tcp
+        ));
+        Logger.LogInfo("Connecting to server...");
+        
+        manager.OnDataReceived += async (byte[] receivedData) =>
+        {
+            ushort userId;
+            NetworkedPlayer plr = null;
+            switch (receivedData[0])
+            {
+                case 0x01:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+
+                    plr ??= await SetupNetworkedPlayer(userId);
+
+                    if (plr == null) break;
+
+                    byte[] rawTransform = new Byte[15];
+                    Array.Copy(receivedData, 3, rawTransform, 0, 15);
+                    //Logger.LogInfo($"Received packet: {BitConverter.ToString(receivedData)}");
+                    //Logger.LogInfo($"Converted transform: {BitConverter.ToString(rawTransform)}");
+                    plr.ApplyTransform(rawTransform);
+
+                    break;
+                case 0x02:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+
+                    if (plr != null)
+                        Destroy(plr.gameObject);
+
+                    break;
+                case 0x03:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+
+                    plr ??= await SetupNetworkedPlayer(userId);
+
+                    if (plr == null) break;
+
+                    plr.playerName = Encoding.UTF8.GetString(receivedData, 3, receivedData.Length - 3);
+                    plr.playerNameText.text = plr.playerName;
+
+                    break;
+            }
+            SimpleRunHandler.currentSeed = 0;
+        };
+        
+        await manager.StartListening(endpoint);
+        Logger.LogInfo("Connected!");
+
+        new NamePacket(SteamFriends.GetPersonaName()).Send();
+    }
     
     public static byte[] SerializeTransform(Vector3 position, Quaternion rotation)
     {
@@ -72,124 +162,88 @@ public class Plugin : BaseUnityPlugin
         return buffer;
     }
 
-    public static UpdatePacket lastSent = new();
-    
-    private async void Awake()
-    {
-        Logger = base.Logger;
-        Patcher.PatchAll();
-        Logger.LogInfo($"Plugin {MyPluginInfo.PLUGIN_GUID} is loaded!");
-
-        //IPAddress address = IPAddress.Parse("127.0.0.1");
-        IPAddress address = IPAddress.Parse("45.133.89.163");
-        IPEndPoint endpoint = new(address, 9843);
-        client = new(
-            AddressFamily.InterNetwork,
-            SocketType.Stream,
-            ProtocolType.Tcp
-        );
-        Logger.LogInfo("Connecting to server...");
-        await client.ConnectAsync(endpoint);
-        Logger.LogInfo("Connected!");
-
-        new NamePacket(SteamFriends.GetPersonaName()).Send();
-        
-        byte[] buffer = new byte[1024];
-        
-        while (true)
-        {
-            int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
-            if (bytesRead == 0)
-            {
-                Console.WriteLine("Disconnected from server.");
-                break;
-            }
-
-            byte[] receivedData = new byte[bytesRead];
-            Array.Copy(buffer, receivedData, bytesRead);
-
-            ushort userId;
-            NetworkedPlayer plr = null;
-            switch (receivedData[0])
-            {
-                case 0x01:
-                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
-                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
-                    {
-                        if (plrPossibility.userId == userId)
-                        {
-                            plr = plrPossibility;
-                            break;
-                        }
-                    }
-                    plr ??= await SetupNetworkedPlayer(userId);
-
-                    if (plr == null) break;
-                    
-                    byte[] rawTransform = new Byte[15];
-                    Array.Copy(receivedData, 3, rawTransform, 0, 15);
-                    //Logger.LogInfo($"Received packet: {BitConverter.ToString(receivedData)}");
-                    //Logger.LogInfo($"Converted transform: {BitConverter.ToString(rawTransform)}");
-                    plr.ApplyTransform(rawTransform);
-                    
-                    break;
-                case 0x02:
-                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
-                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
-                    {
-                        if (plrPossibility.userId == userId)
-                        {
-                            plr = plrPossibility;
-                            break;
-                        }
-                    }
-                    
-                    if (plr != null)
-                        Destroy(plr.gameObject);
-                    
-                    break;
-                case 0x03:
-                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
-                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
-                    {
-                        if (plrPossibility.userId == userId)
-                        {
-                            plr = plrPossibility;
-                            break;
-                        }
-                    }
-                    plr ??= await SetupNetworkedPlayer(userId);
-
-                    if (plr == null) break;
-
-                    plr.playerName = Encoding.UTF8.GetString(receivedData, 3, receivedData.Length - 3);
-                    plr.playerNameText.text = plr.playerName;
-                    
-                    break;
-            }
-        }
-    }
-
     private async Task<NetworkedPlayer> SetupNetworkedPlayer(ushort id = 0xFFFC)
     {
-        new GetPacket(id).Send();
-
-        // somehow get return data here to populate stuff like username
         
         PlayerModel model = GameObject.FindObjectOfType<PlayerModel>();
         if (model != null)
         {
             GameObject newPlayer = Instantiate(model.gameObject);
+            Destroy(newPlayer.GetComponent<PlayerModel>());
             newPlayer.transform.position = model.gameObject.transform.position;
             newPlayer.name = $"HasteTogether_{id}";
             NetworkedPlayer networkedPlayer = newPlayer.AddComponent<NetworkedPlayer>();
             networkedPlayer.userId = id;
             networkedPlayer.animator = newPlayer.GetComponentInChildren<Animator>();
-            Destroy(newPlayer.GetComponent<PlayerModel>());
+            var tcs = new TaskCompletionSource<string>();
+
+            void OnResponseReceived(byte[] data)
+            {
+                if (data[0] == 0x04)
+                {
+                    string responseString = System.Text.Encoding.UTF8.GetString(data, 1, data.Length - 1);
+                    tcs.TrySetResult(responseString);
+                }
+            }
+
+            manager.OnDataReceived += OnResponseReceived; 
+
+            new GetPacket(id).Send();
+
+            networkedPlayer.playerName = await tcs.Task;
+        
+            manager.OnDataReceived -= OnResponseReceived;
             return networkedPlayer;
         }
+
         Console.WriteLine("[ERROR] Not in a scene where a PlayerModel exists.");
         return null;
+    }
+
+}
+
+public class SocketManager
+{
+    public Socket client;
+    private byte[] buffer = new byte[1024];
+
+    public event Action<byte[]> OnDataReceived;
+
+    public SocketManager(Socket clientSocket)
+    {
+        client = clientSocket;
+    }
+
+    public async Task StartListening(IPEndPoint endpoint)
+    {
+        await client.ConnectAsync(endpoint);
+        _ = ReceiveLoop();
+    }
+
+    private async Task ReceiveLoop()
+    {
+        while (true)
+        {
+            try
+            {
+                int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
+                if (bytesRead == 0)
+                {
+                    Console.WriteLine("Disconnected from server.");
+                    break;
+                }
+
+                byte[] receivedData = new byte[bytesRead];
+                Array.Copy(buffer, receivedData, bytesRead);
+
+                OnDataReceived?.Invoke(receivedData);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Socket error: {ex.Message}");
+                break;
+            }
+        }
     }
 }
 
@@ -200,7 +254,21 @@ public class NetworkedPlayer : MonoBehaviour
 
     public Vector3 position = new Vector3();
     public Quaternion rotation = new Quaternion();
-    public string playerName = "Unknown";
+
+    private string _playerName;
+    public string playerName
+    {
+        get
+        {
+            return _playerName;
+        }
+        set
+        {
+            _playerName = value;
+            playerNameText.text = value;
+        }
+    }
+
     public Canvas playerCanvas;
     public TextMeshProUGUI playerNameText;
     
@@ -216,23 +284,19 @@ public class NetworkedPlayer : MonoBehaviour
             (z / 256.0f) - 32767.5f
         );
 
-        // Reconstruct 24-bit signed integers
         int rawRotY = (transformData[9] << 16) | (transformData[10] << 8) | transformData[11];
         int rawRotW = (transformData[12] << 16) | (transformData[13] << 8) | transformData[14];
 
-        // Sign extension for 24-bit integers
         if ((rawRotY & 0x800000) != 0) rawRotY |= unchecked((int)0xFF000000);
         if ((rawRotW & 0x800000) != 0) rawRotW |= unchecked((int)0xFF000000);
 
-        // Convert back to float range [-1,1]
         float rotY = rawRotY / 8388607.0f;
         float rotW = rawRotW / 8388607.0f;
 
-        // Recalculate x and z to maintain unit quaternion
         float xzSquared = 1.0f - (rotY * rotY) - (rotW * rotW);
         float rotX = 0.0f, rotZ = 0.0f;
-        if (xzSquared > 0.0f) 
-            rotZ = Mathf.Sqrt(xzSquared); // Assume positive Z for consistency
+        if (xzSquared > 0.0f)
+            rotZ = Mathf.Sqrt(xzSquared);
 
         // Apply the new quaternion
         Quaternion targetRotation = new Quaternion(rotX, rotY, rotZ, rotW);
@@ -261,6 +325,7 @@ public class NetworkedPlayer : MonoBehaviour
             canvasObj.name = "PlayerCanvas";
             playerCanvas = canvasObj.AddComponent<Canvas>();
             playerCanvas.worldCamera = Camera.main;
+            playerCanvas.sortingOrder = 1;
             canvasObj.transform.localPosition = new Vector3(0, 2.5f, 0);
             canvasObj.transform.localScale = new Vector3(0.006f, 0.006f, 0.006f);
         }
@@ -276,6 +341,12 @@ public class NetworkedPlayer : MonoBehaviour
             playerNameText.text = playerName;
             playerNameText.enableWordWrapping = false;
             playerNameText.alignment = TextAlignmentOptions.Center;
+            
+            playerNameText.fontStyle = FontStyles.Bold;
+            
+            playerNameText.fontSharedMaterial.shader = Shader.Find("TextMeshPro/Distance Field");
+            playerNameText.outlineWidth = 0.35f;
+            playerNameText.outlineColor = Color.black;
         }
         
         playerCanvas.transform.forward = Camera.main.transform.forward;
@@ -289,12 +360,12 @@ public abstract class Packet
 
     public void Send()
     {
-        if (Plugin.client == null || !Plugin.client.Connected) return;//throw new Exception("Not connected to a server!");
+        if (Plugin.manager.client == null || !Plugin.manager.client.Connected) return;//throw new Exception("Not connected to a server!");
         byte[] data = Serialize();
         byte[] toSend = new byte[data.Length+1];
         toSend[0] = PacketID();
         Buffer.BlockCopy(data, 0, toSend, 1, data.Length);
-        Plugin.client.Send(toSend);
+        Plugin.manager.client.Send(toSend);
     }
 }
 

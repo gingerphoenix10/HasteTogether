@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 class SocketServer
 {
-    private static Dictionary<Socket, ushort> clients = new();
+    public static Dictionary<Socket, PlayerInfo> clients = new();
 
     static async Task Main()
     {
@@ -22,42 +22,29 @@ class SocketServer
 
             Console.WriteLine($"Server started on port {port}. Waiting for connections...");
 
-            // Accept clients asynchronously
-            _ = AcceptClientsAsync(serverSocket);
-
-            // Allow user input to send messages to all clients
             while (true)
             {
-                string? input = Console.ReadLine();
-                if (!string.IsNullOrWhiteSpace(input))
+                Socket clientSocket = await serverSocket.AcceptAsync();
+                ushort id = 0x0000;
+                List<ushort> usedIds = PlayerInfo.usedIds();
+                for (ushort idPossibility = 0x0000; idPossibility <= 0xFFFF; idPossibility++)
                 {
-                    BroadcastMessage($"[SERVER]: {input}");
+                    if (!usedIds.Contains(idPossibility))
+                    {
+                        id = idPossibility;
+                        break;
+                    }
                 }
-            }
-        }
-    }
 
-    private static async Task AcceptClientsAsync(Socket serverSocket)
-    {
-        while (true)
-        {
-            Socket clientSocket = await serverSocket.AcceptAsync();
-            ushort id = 0x0000;
-            HashSet<ushort> usedIds = new(clients.Values);
-            for (ushort idPossibility = 0x0000; idPossibility <= 0xFFFF; idPossibility++)
-            {
-                if (!usedIds.Contains(idPossibility))
-                {
-                    id = idPossibility;
-                    break;
-                }
-            }
+                PlayerInfo info = new PlayerInfo();
+                info.userId = id;
             
-            clients.Add(clientSocket, id);
-            Console.WriteLine($"Client connected: {clientSocket.RemoteEndPoint}. Assigning ID: {id}");
+                clients.Add(clientSocket, info);
+                Console.WriteLine($"Client connected: {clientSocket.RemoteEndPoint}. Assigning ID: {id}");
 
-            // Handle client communication
-            _ = Task.Run(() => HandleClient(clientSocket));
+                // Handle client communication
+                _ = Task.Run(() => HandleClient(clientSocket));
+            }
         }
     }
 
@@ -79,23 +66,51 @@ class SocketServer
                 Array.Copy(buffer, receivedData, bytesRead);
 
                 //Console.WriteLine(BitConverter.ToString(receivedData));
+
+                byte[] toSend;
                 
                 switch (receivedData[0])
                 {
                     case 0x01: 
-                    case 0x03:
-                        byte[] toSend = new byte[receivedData.Length + 2];
+                        toSend = new byte[receivedData.Length + 2];
                         toSend[0] = receivedData[0];
-                        toSend[1] = (byte)(clients[clientSocket] >> 8);
-                        toSend[2] = (byte)(clients[clientSocket] & 0xFF);
+                        toSend[1] = (byte)(clients[clientSocket].userId >> 8);
+                        toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
                         Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
-                        foreach (KeyValuePair<Socket, ushort> client in clients)
+                        foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
                         {
-                            if (client.Value != clients[clientSocket]) client.Key.Send(toSend);
+                            if (client.Value.userId != clients[clientSocket].userId) client.Key.Send(toSend);
+                        }
+                        break;
+                    case 0x03:
+                        clients[clientSocket].username = Encoding.UTF8.GetString(receivedData, 1, receivedData.Length - 1);
+    
+                        toSend = new byte[receivedData.Length + 2];
+                        toSend[0] = receivedData[0];
+                        toSend[1] = (byte)(clients[clientSocket].userId >> 8);
+                        toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
+                        Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1); // Copy the username bytes
+                        
+                        foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
+                        {
+                            if (client.Value.userId != clients[clientSocket].userId)
+                            {
+                                client.Key.Send(toSend);
+                            }
                         }
                         break;
                     case 0x04:
-                        clientSocket.Send(Encoding.UTF8.GetBytes("lmao ok"));
+                        PlayerInfo info = PlayerInfo.FindById((ushort)((receivedData[1] << 8) | receivedData[2]));
+                        if (info == null)
+                        {
+                            clientSocket.Send(new byte[1] { receivedData[0] });
+                            break;
+                        }
+                        byte[] usernameBytes = Encoding.UTF8.GetBytes(info.username);
+                        toSend = new byte[1 + usernameBytes.Length];
+                        toSend[0] = receivedData[0];
+                        Array.Copy(usernameBytes, 0, toSend, 1, usernameBytes.Length);
+                        clientSocket.Send(toSend);
                         break;
                 }
             }
@@ -108,31 +123,41 @@ class SocketServer
         {
             byte[] disconnectPacket = new byte[3];
             disconnectPacket[0] = 0x02;
-            disconnectPacket[1] = (byte)(clients[clientSocket] >> 8);
-            disconnectPacket[2] = (byte)(clients[clientSocket] & 0xFF);
-            foreach (KeyValuePair<Socket, ushort> client in clients)
+            disconnectPacket[1] = (byte)(clients[clientSocket].userId >> 8);
+            disconnectPacket[2] = (byte)(clients[clientSocket].userId & 0xFF);
+            foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
             {
-                if (client.Value != clients[clientSocket]) client.Key.Send(disconnectPacket);
+                if (client.Value.userId != clients[clientSocket].userId) client.Key.Send(disconnectPacket);
             }
             clients.Remove(clientSocket);
             clientSocket.Close();
             Console.WriteLine($"Client {clientSocket.RemoteEndPoint} disconnected.");
         }
     }
+}
 
-    private static void BroadcastMessage(string message)
+class PlayerInfo
+{
+    public ushort userId;
+    public string username = "Unknown (s)";
+
+    public static List<ushort> usedIds()
     {
-        byte[] data = Encoding.UTF8.GetBytes(message);
-        foreach (var client in clients.Keys)
+        List<ushort> ids = new();
+        foreach (PlayerInfo info in SocketServer.clients.Values)
         {
-            try
-            {
-                client.Send(data);
-            }
-            catch
-            {
-                // Ignore errors if a client disconnects suddenly
-            }
+            ids.Add(info.userId);
         }
+
+        return ids;
+    }
+
+    public static PlayerInfo FindById(ushort id)
+    {
+        foreach (PlayerInfo info in SocketServer.clients.Values)
+        {
+            if (info.userId == id) return info;
+        }
+        return null;
     }
 }

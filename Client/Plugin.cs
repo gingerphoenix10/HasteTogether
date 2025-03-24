@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
 using BepInEx;
@@ -14,7 +16,7 @@ using MonoMod.Utils;
 using Steamworks;
 using TMPro;
 using UnityEngine;
-using UnityEngine.UIElements;
+using UnityEngine.UI;
 using Unity.Mathematics;
 using Zorro.ControllerSupport;
 using Zorro.Settings;
@@ -32,8 +34,9 @@ public class Plugin : BaseUnityPlugin
     private static readonly Harmony Patcher = new(MyPluginInfo.PLUGIN_GUID);
 
     public static SocketManager manager;
-
     public static UpdatePacket lastSent = new();
+
+    public static Transform TogetherUI;
     
     private async void Awake()
     {
@@ -44,11 +47,7 @@ public class Plugin : BaseUnityPlugin
         //IPAddress address = IPAddress.Parse("127.0.0.1");
         IPAddress address = IPAddress.Parse("45.133.89.163");
         IPEndPoint endpoint = new(address, 9843);
-        manager = new SocketManager(new Socket(
-            AddressFamily.InterNetwork,
-            SocketType.Stream,
-            ProtocolType.Tcp
-        ));
+        manager = new SocketManager();
         Logger.LogInfo("Connecting to server...");
         
         manager.OnDataReceived += async (byte[] receivedData) =>
@@ -117,10 +116,7 @@ public class Plugin : BaseUnityPlugin
             SimpleRunHandler.currentSeed = 0;
         };
         
-        await manager.StartListening(endpoint);
-        Logger.LogInfo("Connected!");
-
-        new NamePacket(SteamFriends.GetPersonaName()).Send();
+        _ = manager.StartListening(endpoint);
     }
     
     public static byte[] SerializeTransform(Vector3 position, Quaternion rotation)
@@ -209,18 +205,34 @@ public class SocketManager
 
     public event Action<byte[]> OnDataReceived;
 
-    public SocketManager(Socket clientSocket)
+    public SocketManager()
     {
-        client = clientSocket;
+        client = new Socket(
+            AddressFamily.InterNetwork,
+            SocketType.Stream,
+            ProtocolType.Tcp
+        );
     }
 
     public async Task StartListening(IPEndPoint endpoint)
     {
-        await client.ConnectAsync(endpoint);
-        _ = ReceiveLoop();
+        try
+        {
+            await client.ConnectAsync(endpoint);
+            Plugin.Logger.LogInfo("Connected!");
+            new NamePacket("timed out in discord - "+SteamFriends.GetPersonaName()).Send();
+            _ = ReceiveLoop(endpoint);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Connection error: {ex.Message}");
+            foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>()) GameObject.Destroy(plr.gameObject);
+            await Task.Delay(3000);
+            _ = StartListening(endpoint);
+        }
     }
 
-    private async Task ReceiveLoop()
+    private async Task ReceiveLoop(IPEndPoint endpoint)
     {
         while (true)
         {
@@ -230,6 +242,14 @@ public class SocketManager
                 if (bytesRead == 0)
                 {
                     Console.WriteLine("Disconnected from server.");
+                    await Task.Delay(3000);
+                    client.Dispose();
+                    client = new Socket(
+                        AddressFamily.InterNetwork,
+                        SocketType.Stream,
+                        ProtocolType.Tcp
+                    );
+                    _ = StartListening(endpoint);
                     break;
                 }
 
@@ -241,9 +261,31 @@ public class SocketManager
             catch (Exception ex)
             {
                 Console.WriteLine($"Socket error: {ex.Message}");
+                foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>()) GameObject.Destroy(plr.gameObject);
+                await Task.Delay(3000);
+                client.Dispose();
+                client = new Socket(
+                    AddressFamily.InterNetwork,
+                    SocketType.Stream,
+                    ProtocolType.Tcp
+                );
+                _ = StartListening(endpoint);
                 break;
             }
         }
+    }
+}
+
+public class ConnectionState : MonoBehaviour
+{
+    public Image img;
+    public Sprite connected;
+    public Sprite disconnected;
+    void Update()
+    {
+        if (Plugin.manager == null || Plugin.manager.client == null || connected == null)
+            return;
+        img.sprite = Plugin.manager.client.Connected ? connected : disconnected;
     }
 }
 
@@ -435,6 +477,60 @@ internal static class PlayerCharacterPatch
         {
             packet.Send();
             Plugin.lastSent = packet;
+        }
+    }
+}
+
+[HarmonyPatch(typeof(PersistentObjects))]
+internal static class PersistentObjectsPatch
+{
+    [HarmonyPatch(nameof(PersistentObjects.Awake))]
+    [HarmonyPrefix]
+    internal static bool Awake(PersistentObjects __instance)
+    {
+        if (PersistentObjects.instance != null)
+        {
+            GameObject.DestroyImmediate(__instance.gameObject);
+        }
+        else
+        {
+            PersistentObjects.instance = __instance;
+            __instance.transform.SetParent(null);
+            GameObject.DontDestroyOnLoad(__instance.gameObject);
+            Transform persistent = __instance.transform.Find("UI_Persistent");
+            
+            Plugin.TogetherUI = new GameObject("TogetherUI").transform;
+            Plugin.TogetherUI.SetParent(persistent);
+            
+            Transform TogetherConnectionImg = new GameObject("Connection").transform;
+            TogetherConnectionImg.SetParent(Plugin.TogetherUI);
+            ConnectionState state = TogetherConnectionImg.gameObject.AddComponent<ConnectionState>();
+            state.img = TogetherConnectionImg.gameObject.AddComponent<Image>();
+            state.img.transform.localPosition = new Vector2(1780, 100);
+            state.img.transform.localScale = new Vector2(2.5f, 2.5f);
+            state.img.preserveAspect = true;
+            state.connected = fromResource("HasteTogether.Graphics.HasteTogether_Connected.png");
+            state.disconnected = fromResource("HasteTogether.Graphics.HasteTogether_Disconnected.png");
+        }
+        return false;
+    }
+
+    public static Sprite fromResource(string name)
+    {
+        Texture2D texture = new Texture2D(1,1);
+        Stream imgStream = Assembly.GetExecutingAssembly().GetManifestResourceStream(name);
+        byte[] buffer = new byte[16*1024];
+        using (MemoryStream ms = new MemoryStream())
+        {
+            int read;
+            while ((read = imgStream.Read(buffer, 0, buffer.Length)) > 0)
+            {
+                ms.Write(buffer, 0, read);
+            }
+
+            texture.LoadImage(ms.ToArray());
+            return Sprite.Create(texture, new Rect(0, 0, texture.width, texture.height), Vector2.zero);
+            
         }
     }
 }

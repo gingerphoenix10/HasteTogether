@@ -46,6 +46,13 @@
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.2" PrivateAssets="all" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Remove="Graphics\HasteTogether_Connected.png" />
+    <EmbeddedResource Include="Graphics\HasteTogether_Connected.png" />
+    <None Remove="Graphics\HasteTogether_Disconnected.png" />
+    <EmbeddedResource Include="Graphics\HasteTogether_Disconnected.png" />
+  </ItemGroup>
+
   <Target Name="CopyOutputFileToGame" AfterTargets="Build">
     <Copy SourceFiles="$(OutputPath)\$(AssemblyName).dll" DestinationFolder="$(HASTEDir)\BepInEx\Plugins\$(MSBuildProjectName)"/>
   </Target>

@@ -85,7 +85,7 @@ class SocketServer
                         {
                             if (client.Value.userId != clients[clientSocket].userId)
                             {
-                                client.Key.Send(toSend);
+                                await SendData(client.Key, toSend);
                             }
                         }
                         break;
@@ -102,7 +102,7 @@ class SocketServer
                         toSend = new byte[1 + usernameBytes.Length];
                         toSend[0] = receivedData[0];
                         Array.Copy(usernameBytes, 0, toSend, 1, usernameBytes.Length);
-                        clientSocket.Send(toSend);
+                        await SendData(clientSocket, toSend);
                         break;
                     default:
                         toSend = new byte[receivedData.Length + 2];
@@ -112,7 +112,7 @@ class SocketServer
                         Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
                         foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
                         {
-                            if (client.Value.userId != clients[clientSocket].userId) client.Key.Send(toSend);
+                            if (client.Value.userId != clients[clientSocket].userId) await SendData(client.Key, toSend);
                         }
                         break;
                 }
@@ -130,12 +130,19 @@ class SocketServer
             disconnectPacket[2] = (byte)(clients[clientSocket].userId & 0xFF);
             foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
             {
-                if (client.Value.userId != clients[clientSocket].userId) client.Key.Send(disconnectPacket);
+                if (client.Value.userId != clients[clientSocket].userId) await SendData(client.Key, disconnectPacket);
             }
             clients.Remove(clientSocket);
             clientSocket.Close();
             Console.WriteLine($"Client {clientSocket.RemoteEndPoint} disconnected.");
         }
+    }
+
+    private static async Task<int> SendData(Socket socket, byte[] data)
+    {
+        byte[] lengthPrefix = BitConverter.GetBytes((ushort)data.Length);
+        byte[] fullMessage = lengthPrefix.Concat(data).ToArray();
+        return await socket.SendAsync(fullMessage, SocketFlags.None);
     }
 }
 

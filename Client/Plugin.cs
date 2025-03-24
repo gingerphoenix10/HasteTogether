@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -177,7 +178,9 @@ public class Plugin : BaseUnityPlugin
             {
                 if (data[0] == 0x04)
                 {
+                    Plugin.Logger.LogInfo(BitConverter.ToString(data));
                     string responseString = System.Text.Encoding.UTF8.GetString(data, 1, data.Length - 1);
+                    Plugin.Logger.LogInfo(responseString);
                     tcs.TrySetResult(responseString);
                 }
             }
@@ -189,6 +192,7 @@ public class Plugin : BaseUnityPlugin
             networkedPlayer.playerName = await tcs.Task;
         
             manager.OnDataReceived -= OnResponseReceived;
+            await Task.Delay(5000);
             return networkedPlayer;
         }
 
@@ -220,7 +224,7 @@ public class SocketManager
         {
             await client.ConnectAsync(endpoint);
             Plugin.Logger.LogInfo("Connected!");
-            new NamePacket("timed out in discord - "+SteamFriends.GetPersonaName()).Send();
+            new NamePacket(SteamFriends.GetPersonaName()).Send();
             _ = ReceiveLoop(endpoint);
         }
         catch (Exception ex)
@@ -232,48 +236,67 @@ public class SocketManager
         }
     }
 
-    private async Task ReceiveLoop(IPEndPoint endpoint)
+private async Task ReceiveLoop(IPEndPoint endpoint)
+{
+    MemoryStream messageBuffer = new MemoryStream();
+    while (true)
     {
-        while (true)
+        try
         {
-            try
+            int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
+            if (bytesRead == 0)
             {
-                int bytesRead = await client.ReceiveAsync(buffer, SocketFlags.None);
-                if (bytesRead == 0)
-                {
-                    Console.WriteLine("Disconnected from server.");
-                    await Task.Delay(3000);
-                    client.Dispose();
-                    client = new Socket(
-                        AddressFamily.InterNetwork,
-                        SocketType.Stream,
-                        ProtocolType.Tcp
-                    );
-                    _ = StartListening(endpoint);
-                    break;
-                }
-
-                byte[] receivedData = new byte[bytesRead];
-                Array.Copy(buffer, receivedData, bytesRead);
-
-                OnDataReceived?.Invoke(receivedData);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"Socket error: {ex.Message}");
-                foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>()) GameObject.Destroy(plr.gameObject);
+                Console.WriteLine("Disconnected from server.");
                 await Task.Delay(3000);
                 client.Dispose();
-                client = new Socket(
-                    AddressFamily.InterNetwork,
-                    SocketType.Stream,
-                    ProtocolType.Tcp
-                );
+                client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
                 _ = StartListening(endpoint);
                 break;
             }
+
+            messageBuffer.Write(buffer, 0, bytesRead);
+
+            while (messageBuffer.Length >= 2) // Ensure we have at least the message length prefix
+            {
+                byte[] lengthBytes = new byte[2];
+                messageBuffer.Position = 0;
+                messageBuffer.Read(lengthBytes, 0, 2);
+                ushort messageLength = BitConverter.ToUInt16(lengthBytes, 0);
+
+                if (messageBuffer.Length >= messageLength + 2)
+                {
+                    byte[] messageBytes = new byte[messageLength];
+                    messageBuffer.Read(messageBytes, 0, messageLength);
+
+                    // Notify that we received a complete message
+                    OnDataReceived?.Invoke(messageBytes);
+
+                    // Compact the buffer (keep any remaining bytes for the next message)
+                    byte[] remaining = messageBuffer.ToArray().Skip(messageLength + 2).ToArray();
+                    messageBuffer.SetLength(0);
+                    messageBuffer.Write(remaining, 0, remaining.Length);
+                }
+                else
+                {
+                    // Wait for more data before processing the message
+                    break;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Socket error: {ex.Message}");
+            foreach (NetworkedPlayer plr in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                GameObject.Destroy(plr.gameObject);
+            await Task.Delay(3000);
+            client.Dispose();
+            client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            _ = StartListening(endpoint);
+            break;
         }
     }
+}
+
 }
 
 public class ConnectionState : MonoBehaviour

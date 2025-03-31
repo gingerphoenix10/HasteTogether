@@ -113,6 +113,43 @@ public class Plugin : BaseUnityPlugin
                     plr.playerNameText.text = plr.playerName;
 
                     break;
+                case 0x05:
+                    userId = (ushort)((receivedData[1] << 8) | receivedData[2]);
+                    foreach (NetworkedPlayer plrPossibility in GameObject.FindObjectsOfType<NetworkedPlayer>())
+                    {
+                        if (plrPossibility.userId == userId)
+                        {
+                            plr = plrPossibility;
+                            break;
+                        }
+                    }
+
+                    plr ??= await SetupNetworkedPlayer(userId);
+
+                    if (plr == null) break;
+
+                    byte[] rawAnimData = new byte[receivedData.Length - 3];
+                    Array.Copy(receivedData, 3, rawAnimData, 0, rawAnimData.Length);
+                    AnimationPacket animStuff = AnimationPacket.Deserialize(rawAnimData);
+
+                    switch (animStuff.setType)
+                    {
+                        case (byte)AnimationPacket.SetTypes.Play:
+                            plr.animator.Play(animStuff.animationValue.ToString());
+                            Logger.LogInfo($"Playing animation: {animStuff.animationValue}");
+                            break;
+                        case (byte)AnimationPacket.SetTypes.SetInteger:
+                            plr.animator.SetInteger(animStuff.animationKey, (int)animStuff.animationValue);
+                            break;
+                        case (byte)AnimationPacket.SetTypes.SetBool:
+                            plr.animator.SetBool(animStuff.animationKey, (bool)animStuff.animationValue);
+                            break;
+                        case (byte)AnimationPacket.SetTypes.SetFloat:
+                            plr.animator.SetFloat(animStuff.animationKey, (float)animStuff.animationValue);
+                            break;
+                    }
+                    
+                    break;
             }
             SimpleRunHandler.currentSeed = 0;
         };
@@ -192,7 +229,6 @@ public class Plugin : BaseUnityPlugin
             networkedPlayer.playerName = await tcs.Task;
         
             manager.OnDataReceived -= OnResponseReceived;
-            await Task.Delay(5000);
             return networkedPlayer;
         }
 
@@ -255,32 +291,24 @@ private async Task ReceiveLoop(IPEndPoint endpoint)
             }
 
             messageBuffer.Write(buffer, 0, bytesRead);
-
-            while (messageBuffer.Length >= 2) // Ensure we have at least the message length prefix
+            
+            while (messageBuffer.Length >= 2)
             {
-                byte[] lengthBytes = new byte[2];
-                messageBuffer.Position = 0;
-                messageBuffer.Read(lengthBytes, 0, 2);
+                byte[] lengthBytes = messageBuffer.ToArray().Take(2).ToArray();
                 ushort messageLength = BitConverter.ToUInt16(lengthBytes, 0);
 
                 if (messageBuffer.Length >= messageLength + 2)
                 {
-                    byte[] messageBytes = new byte[messageLength];
-                    messageBuffer.Read(messageBytes, 0, messageLength);
+                    byte[] messageBytes = messageBuffer.ToArray().Skip(2).Take(messageLength).ToArray();
 
-                    // Notify that we received a complete message
                     OnDataReceived?.Invoke(messageBytes);
 
-                    // Compact the buffer (keep any remaining bytes for the next message)
+                    // Remove processed data
                     byte[] remaining = messageBuffer.ToArray().Skip(messageLength + 2).ToArray();
                     messageBuffer.SetLength(0);
                     messageBuffer.Write(remaining, 0, remaining.Length);
                 }
-                else
-                {
-                    // Wait for more data before processing the message
-                    break;
-                }
+                else break;
             }
         }
         catch (Exception ex)
@@ -296,6 +324,7 @@ private async Task ReceiveLoop(IPEndPoint endpoint)
         }
     }
 }
+
 
 }
 
@@ -363,21 +392,11 @@ public class NetworkedPlayer : MonoBehaviour
         if (xzSquared > 0.0f)
             rotZ = Mathf.Sqrt(xzSquared);
 
-        // Apply the new quaternion
         Quaternion targetRotation = new Quaternion(rotX, rotY, rotZ, rotW);
         rotation = targetRotation;
         position = targetPosition;
-
-        //Plugin.Logger.LogInfo($"Deserialized {transformData[9]:X2} {transformData[10]:X2} {transformData[11]:X2} | {transformData[12]:X2} {transformData[13]:X2} {transformData[14]:X2} to Quaternion({rotX}, {rotY}, {rotZ}, {rotW})");
-        
-        SetAnimation("New_Courier_Idle");
     }
 
-    public void SetAnimation(string animName)
-    {
-        animator.Play(animName);
-    }
-    
     private float interpolationSpeed = 10.0f;
     private void Update()
     {
@@ -430,7 +449,9 @@ public abstract class Packet
         byte[] toSend = new byte[data.Length+1];
         toSend[0] = PacketID();
         Buffer.BlockCopy(data, 0, toSend, 1, data.Length);
-        Plugin.manager.client.Send(toSend);
+        byte[] lengthPrefix = BitConverter.GetBytes((ushort)toSend.Length);
+        byte[] fullMessage = lengthPrefix.Concat(toSend).ToArray();
+        Plugin.manager.client.Send(fullMessage);
     }
 }
 
@@ -485,6 +506,89 @@ public class GetPacket : Packet
     public GetPacket(ushort userId)
     {
         this.userId = userId;
+    }
+}
+
+public class AnimationPacket : Packet
+{
+    public enum SetTypes : byte
+    {
+        Play = 0x00,
+        SetInteger = 0x01,
+        SetBool = 0x02,
+        SetFloat = 0x03
+    }
+    
+    public byte setType;
+    public string animationKey;
+    public object animationValue;
+    public override byte PacketID() => 0x05;
+
+    public override byte[] Serialize()
+    {
+        byte[] keyBytes = Encoding.UTF8.GetBytes(animationKey);
+        byte keyLength = (byte)keyBytes.Length;
+
+        byte[] valueBytes;
+        switch ((SetTypes)setType)
+        {
+            case SetTypes.SetInteger:
+                valueBytes = BitConverter.GetBytes(Convert.ToInt32(animationValue));
+                break;
+            case SetTypes.SetBool:
+                valueBytes = new byte[] { Convert.ToBoolean(animationValue) ? (byte)1 : (byte)0 };
+                break;
+            case SetTypes.SetFloat:
+                valueBytes = BitConverter.GetBytes(Convert.ToSingle(animationValue));
+                break;
+            default:
+                valueBytes = new byte[0];
+                break;
+        }
+
+        byte[] packet = new byte[1 + 1 + keyBytes.Length + valueBytes.Length];
+        packet[0] = setType;
+        packet[1] = keyLength;
+        Array.Copy(keyBytes, 0, packet, 2, keyBytes.Length);
+        Array.Copy(valueBytes, 0, packet, 2 + keyBytes.Length, valueBytes.Length);
+
+        return packet;
+    }
+    
+    public AnimationPacket(byte setType, string key, object value)
+    {
+        this.setType = setType;
+        this.animationKey = key;
+        this.animationValue = value;
+    }
+    
+    public static AnimationPacket Deserialize(byte[] data)
+    {
+        if (data.Length < 2) throw new Exception("Invalid packet");
+
+        byte setType = data[0];
+        byte keyLength = data[1];
+
+        if (data.Length < 2 + keyLength) throw new Exception("Invalid packet");
+
+        string animationKey = Encoding.UTF8.GetString(data, 2, keyLength);
+        object animationValue = null;
+
+        int valueStartIndex = 2 + keyLength;
+        switch ((SetTypes)setType)
+        {
+            case SetTypes.SetInteger:
+                animationValue = BitConverter.ToInt32(data, valueStartIndex);
+                break;
+            case SetTypes.SetBool:
+                animationValue = data[valueStartIndex] == 1;
+                break;
+            case SetTypes.SetFloat:
+                animationValue = BitConverter.ToSingle(data, valueStartIndex);
+                break;
+        }
+
+        return new AnimationPacket(setType, animationKey, animationValue);
     }
 }
 
@@ -567,5 +671,44 @@ internal static class SteamAPIPatch
     {
         __result = false;
         return false;
+    }
+}
+
+[HarmonyPatch(typeof(Animator))]
+internal static class AnimatorPatch
+{
+    [HarmonyPatch(nameof(Animator.Play))]
+    [HarmonyPatch(new Type[] { typeof(string), typeof(int), typeof(float)})]
+    [HarmonyPrefix]
+    internal static void Play(Animator __instance, string stateName, int layer, float normalizedTime)
+    {
+        if (__instance != PlayerCharacter.localPlayer.refs.animationHandler.animator) return;
+        new AnimationPacket((byte)AnimationPacket.SetTypes.Play, "animName", stateName).Send();
+    }
+    
+    [HarmonyPatch(nameof(Animator.SetInteger))]
+    [HarmonyPatch(new Type[] { typeof(string), typeof(int)})]
+    [HarmonyPrefix]
+    internal static void SetInteger(Animator __instance, string name, int value)
+    {
+        if (__instance != PlayerCharacter.localPlayer.refs.animationHandler.animator) return;
+        new AnimationPacket((byte)AnimationPacket.SetTypes.SetInteger, name, value).Send();
+    }
+    [HarmonyPatch(nameof(Animator.SetBool))]
+    [HarmonyPatch(new Type[] { typeof(string), typeof(bool)})]
+    [HarmonyPrefix]
+    internal static void SetBool(Animator __instance, string name, bool value)
+    {
+        if (__instance != PlayerCharacter.localPlayer.refs.animationHandler.animator) return;
+        new AnimationPacket((byte)AnimationPacket.SetTypes.SetBool, name, value).Send();
+    }
+    
+    [HarmonyPatch(nameof(Animator.SetFloat))]
+    [HarmonyPatch(new Type[] { typeof(string), typeof(float)})]
+    [HarmonyPrefix]
+    internal static void SetFloat(Animator __instance, string name, float value)
+    {
+        if (__instance != PlayerCharacter.localPlayer.refs.animationHandler.animator) return;
+        new AnimationPacket((byte)AnimationPacket.SetTypes.SetFloat, name, value).Send();
     }
 }

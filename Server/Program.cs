@@ -51,7 +51,9 @@ class SocketServer
     private static async Task HandleClient(Socket clientSocket)
     {
         byte[] buffer = new byte[1024];
-
+        MemoryStream messageBuffer = new MemoryStream();
+        int latestAnim = 0;
+        
         try
         {
             while (true)
@@ -62,61 +64,91 @@ class SocketServer
                     break; // Client disconnected
                 }
 
-                byte[] receivedData = new byte[bytesRead];
-                Array.Copy(buffer, receivedData, bytesRead);
+                messageBuffer.Write(buffer, 0, bytesRead);
 
-                //Console.WriteLine(BitConverter.ToString(receivedData));
-
-                byte[] toSend;
-                
-                switch (receivedData[0])
+                while (messageBuffer.Length >= 2) // Ensure we have at least the message length prefix
                 {
-                    case 0x03:
-                        clients[clientSocket].username = Encoding.UTF8.GetString(receivedData, 1, receivedData.Length - 1);
-                        Console.WriteLine($"{clients[clientSocket].userId} username set to {clients[clientSocket].username}");
-                        
-                        toSend = new byte[receivedData.Length + 2];
-                        toSend[0] = receivedData[0];
-                        toSend[1] = (byte)(clients[clientSocket].userId >> 8);
-                        toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
-                        Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1); // Copy the username bytes
-                        
-                        foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
+                    byte[] lengthBytes = messageBuffer.ToArray().Take(2).ToArray();
+                    ushort messageLength = BitConverter.ToUInt16(lengthBytes, 0);
+
+                    if (messageBuffer.Length >= messageLength + 2)
+                    {
+                        byte[] receivedData = messageBuffer.ToArray().Skip(2).Take(messageLength).ToArray();
+
+                        byte[] toSend;
+                        switch (receivedData[0])
                         {
-                            if (client.Value.userId != clients[clientSocket].userId)
-                            {
-                                await SendData(client.Key, toSend);
-                            }
-                        }
-                        break;
-                    case 0x04:
-                        PlayerInfo info = PlayerInfo.FindById((ushort)((receivedData[1] << 8) | receivedData[2]));
-                        string username = $"no username for {(ushort)((receivedData[1] << 8) | receivedData[2])}";
-                        if (info != null)
-                        {
-                            username = info.username;
+                            case 0x03:
+                                clients[clientSocket].username = Encoding.UTF8.GetString(receivedData, 1, receivedData.Length - 1);
+                                Console.WriteLine($"{clients[clientSocket].userId} username set to {clients[clientSocket].username}");
+
+                                toSend = new byte[receivedData.Length + 2];
+                                toSend[0] = receivedData[0];
+                                toSend[1] = (byte)(clients[clientSocket].userId >> 8);
+                                toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
+                                Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
+
+                                foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
+                                {
+                                    if (client.Value.userId != clients[clientSocket].userId)
+                                    {
+                                        SendData(client.Key, toSend);
+                                    }
+                                }
+                                break;
+                            case 0x04:
+                                PlayerInfo info = PlayerInfo.FindById((ushort)((receivedData[1] << 8) | receivedData[2]));
+                                string username = $"no username for {(ushort)((receivedData[1] << 8) | receivedData[2])}";
+                                if (info != null)
+                                {
+                                    username = info.username;
+                                }
+                                if (username == "") username = "no username sent";
+                                byte[] usernameBytes = Encoding.UTF8.GetBytes(username);
+                                toSend = new byte[1 + usernameBytes.Length];
+                                toSend[0] = receivedData[0];
+                                Array.Copy(usernameBytes, 0, toSend, 1, usernameBytes.Length);
+                                SendData(clientSocket, toSend);
+                                break;
+                            case 0x05:
+                                int epoch = (int)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalSeconds;
+                                if (epoch - latestAnim < 0.5) break;
+                                latestAnim = epoch;
+                                toSend = new byte[receivedData.Length + 2];
+                                toSend[0] = receivedData[0];
+                                toSend[1] = (byte)(clients[clientSocket].userId >> 8);
+                                toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
+                                Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
+                                foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
+                                {
+                                    if (client.Value.userId != clients[clientSocket].userId) SendData(client.Key, toSend);
+                                }
+                                break;
+                            default:
+                                toSend = new byte[receivedData.Length + 2];
+                                toSend[0] = receivedData[0];
+                                toSend[1] = (byte)(clients[clientSocket].userId >> 8);
+                                toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
+                                Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
+                                foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
+                                {
+                                    if (client.Value.userId != clients[clientSocket].userId) SendData(client.Key, toSend);
+                                }
+                                break;
                         }
 
-                        if (username == "") username = "no username sent";
-                        byte[] usernameBytes = Encoding.UTF8.GetBytes(username);
-                        toSend = new byte[1 + usernameBytes.Length];
-                        toSend[0] = receivedData[0];
-                        Array.Copy(usernameBytes, 0, toSend, 1, usernameBytes.Length);
-                        await SendData(clientSocket, toSend);
-                        break;
-                    default:
-                        toSend = new byte[receivedData.Length + 2];
-                        toSend[0] = receivedData[0];
-                        toSend[1] = (byte)(clients[clientSocket].userId >> 8);
-                        toSend[2] = (byte)(clients[clientSocket].userId & 0xFF);
-                        Array.Copy(receivedData, 1, toSend, 3, receivedData.Length - 1);
-                        foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
-                        {
-                            if (client.Value.userId != clients[clientSocket].userId) await SendData(client.Key, toSend);
-                        }
-                        break;
+                        // Remove processed data from buffer
+                        byte[] remaining = messageBuffer.ToArray().Skip(messageLength + 2).ToArray();
+                        messageBuffer.SetLength(0);
+                        messageBuffer.Write(remaining, 0, remaining.Length);
+                    }
+                    else
+                    {
+                        break; // Wait for more data
+                    }
                 }
             }
+
         }
         catch (Exception ex)
         {
@@ -130,7 +162,7 @@ class SocketServer
             disconnectPacket[2] = (byte)(clients[clientSocket].userId & 0xFF);
             foreach (KeyValuePair<Socket, PlayerInfo> client in clients)
             {
-                if (client.Value.userId != clients[clientSocket].userId) await SendData(client.Key, disconnectPacket);
+                if (client.Value.userId != clients[clientSocket].userId) SendData(client.Key, disconnectPacket);
             }
             clients.Remove(clientSocket);
             clientSocket.Close();
@@ -138,11 +170,11 @@ class SocketServer
         }
     }
 
-    private static async Task<int> SendData(Socket socket, byte[] data)
+    private static int SendData(Socket socket, byte[] data)
     {
         byte[] lengthPrefix = BitConverter.GetBytes((ushort)data.Length);
         byte[] fullMessage = lengthPrefix.Concat(data).ToArray();
-        return await socket.SendAsync(fullMessage, SocketFlags.None);
+        return socket.Send(fullMessage);
     }
 }
 
